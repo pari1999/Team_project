@@ -1,0 +1,6 @@
+torch
+opencv-python
+pyserial
+depthai
+robomaster
+numpy
