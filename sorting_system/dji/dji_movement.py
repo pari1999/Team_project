@@ -1,10 +1,39 @@
-from robomaster import robot
-import logging
+import time
+def robomaster_move(ep_robot):
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+    # Get chassis and arm modules
+    chassis = ep_robot.chassis
 
-def move_straight():
-    with robot.Robot() as ep_robot:
-        ep_robot.initialize(conn_type="sta", sn="192.168.0.110")  # Replace with IP
-        ep_robot.chassis.move(x=1.0, y=0, z=0, xy_speed=0.5).wait_for_completed()
+    #Move forward
+    print("Moving forward...")
+    chassis.move(x=3, y=0, z=0, xy_speed=1).wait_for_completed()
+    time.sleep(1)
+
+    # Rotate right (clockwise) 90°
+    print("Turning RIGHT 90 degrees")
+    chassis.move(x=0, y=0, z=-90, xy_speed=1).wait_for_completed()
+    time.sleep(1)
+
+    #Move forward
+    print("Moving forward...")
+    chassis.move(x=3, y=0, z=0, xy_speed=1).wait_for_completed()
+    time.sleep(1)
+
+    #Move backward
+    print("Moving backward...")
+    chassis.move(x=-3, y=0, z=0, xy_speed=1).wait_for_completed()
+    time.sleep(1)
+
+    # Rotate right (clockwise) 90°
+    print("Turning RIGHT 90 degrees")
+    chassis.move(x=0, y=0, z=-90, xy_speed=1).wait_for_completed()
+    time.sleep(1)
+
+    #Move forward
+    print("Moving forward...")
+    chassis.move(x=3, y=0, z=0, xy_speed=1).wait_for_completed()
+    time.sleep(1)
+
+    #Close connection
+    ep_robot.close()
+    print("Finished.")
