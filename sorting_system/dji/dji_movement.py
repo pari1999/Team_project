@@ -1,10 +1,11 @@
-from robomaster import robot
 import logging
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def move_straight():
-    with robot.Robot() as ep_robot:
-        ep_robot.initialize(conn_type="sta", sn="192.168.0.110")  # Replace with IP
-        ep_robot.chassis.move(x=1.0, y=0, z=0, xy_speed=0.5).wait_for_completed()
+def drive_pattern(ep_robot):
+    logger.info("[DJI] Drive pattern skipped (not used in this mode)")
+
+def arm_up_down(ep_robot):
+    logger.info("[DJI] Arm movement skipped (handled in camera logic)")
