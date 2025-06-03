@@ -4,3 +4,6 @@ pyserial
 depthai
 robomaster
 numpy
+pandas
+requests
+rplidar
