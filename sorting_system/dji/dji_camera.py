@@ -12,7 +12,23 @@ logger = logging.getLogger(__name__)
 
 MODEL_PATH = str(Path(__file__).parent.parent / "models" / "yolov5n.pt")
 
-TARGET_BOTTLE_HEIGHT = 200 
+def calculate_optimal_approach(frame_height, box_height, box_width):
+    """
+    Calculate if the robot is at optimal distance for pickup based on Object size
+    relative to frame and aspect ratio.
+    """
+    frame_coverage = box_height / frame_height
+    aspect_ratio = box_height / box_width if box_width > 0 else 0
+    
+    # Ideal bottle should take up about 45-55% of frame height
+    # and maintain expected bottle aspect ratio (typically 2.5-3.5)
+    ideal_coverage = (0.45, 0.55)
+    ideal_aspect_ratio = (2.5, 3.5)
+    
+    is_optimal = (ideal_coverage[0] <= frame_coverage <= ideal_coverage[1] and 
+                 ideal_aspect_ratio[0] <= aspect_ratio <= ideal_aspect_ratio[1])
+    
+    return is_optimal, frame_coverage
 
 def start_stream(ep_robot):
     logger.info("[DJI] Starting YOLOv5 detection and pick-up routine")
@@ -90,8 +106,8 @@ def start_stream(ep_robot):
                     x1, y1, x2, y2 = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
                     object_center_x = (x1 + x2) // 2
 
-                # Approach object (move until bottle appears small enough)
-                box_height_history = []
+                # Approach object (move until optimal distance)
+                box_measurements = []
                 while True:
                     img = ep_camera.read_cv2_image()
                     if img is None:
@@ -103,17 +119,24 @@ def start_stream(ep_robot):
                     row = detections.iloc[0]
                     x1, y1, x2, y2 = int(row['xmin']), int(row['ymin']), int(row['xmax']), int(row['ymax'])
                     box_height = y2 - y1
+                    box_width = x2 - x1
                     object_center_x = (x1 + x2) // 2
-                    box_height_history.append(box_height)
-                    if len(box_height_history) > 4:
-                        box_height_history.pop(0)
-                    avg_box_height = sum(box_height_history) / len(box_height_history)
+                    
+                    # Keep track of recent measurements
+                    box_measurements.append((box_height, box_width))
+                    if len(box_measurements) > 4:
+                        box_measurements.pop(0)
+                    
+                    # Use average measurements to reduce noise
+                    avg_height = sum(m[0] for m in box_measurements) / len(box_measurements)
+                    avg_width = sum(m[1] for m in box_measurements) / len(box_measurements)
+                    
+                    is_optimal, coverage = calculate_optimal_approach(img.shape[0], avg_height, avg_width)
+                    
+                    logger.info(f"[Approach] Current coverage: {coverage:.2f}, Height: {avg_height:.1f}px, Width: {avg_width:.1f}px")
 
-                    logger.info(f"[Approach] Avg box height: {avg_box_height:.1f}px (target: {TARGET_BOTTLE_HEIGHT}px)")
-
-                    # Allow a buffer zone
-                    if avg_box_height <= TARGET_BOTTLE_HEIGHT + 20:  # Increased buffer zone
-                        logger.info(f"[Approach] Bottle is close enough (avg height: {avg_box_height:.1f}px). Doing final alignment.")
+                    if is_optimal:
+                        logger.info(f"[Approach] Reached optimal position (coverage: {coverage:.2f}). Doing final alignment.")
                         # Final alignment: center horizontally
                         for _ in range(3):
                             img = ep_camera.read_cv2_image()
@@ -140,9 +163,9 @@ def start_stream(ep_robot):
                         break
 
                     # Move forward with speed based on how far we are
-                    if avg_box_height < 400:  # Adjusted threshold
+                    if avg_height < 400:  # Adjusted threshold
                         speed, step_time = 0.2, 0.4
-                    elif avg_box_height < 500:  # Adjusted threshold
+                    elif avg_height < 500:  # Adjusted threshold
                         speed, step_time = 0.12, 0.3
                     else:
                         speed, step_time = 0.07, 0.2
@@ -152,17 +175,40 @@ def start_stream(ep_robot):
                     ep_chassis.drive_speed(x=0, y=0, z=0)
 
                 # Pick up object
-                ep_arm.move(0.5, -20).wait_for_completed()
-                ep_arm.move(1, -40).wait_for_completed()
+                box_height = y2 - y1
+                box_width = x2 - x1
+                forward_distance, down_angle, final_angle = calculate_gripper_positions(box_height, box_width)
+                
+                # Open gripper wider for larger bottles
+                gripper_width = min(1.0, 0.5 + (box_width / 640))  # Scale gripper width based on bottle width
+                ep_gripper.open(gripper_width)
+                
+                # Move arm to calculated positions
+                ep_arm.move(forward_distance, down_angle).wait_for_completed()
+                ep_arm.move(1, down_angle - 20).wait_for_completed()  # Move slightly more down
                 time.sleep(0.5)
                 ep_gripper.close()
                 time.sleep(1)
-                ep_arm.move(1, 30).wait_for_completed()
-                logger.info("[DJI] Object picked")
+                ep_arm.move(1, final_angle).wait_for_completed()
+                logger.info(f"[DJI] Object picked with adaptive positions - height: {box_height}px, width: {box_width}px")
                 break
     finally:
         ep_camera.stop_video_stream()
         cv2.destroyAllWindows()
+
+def calculate_gripper_positions(box_height, box_width):
+    """Calculate appropriate gripper positions based on bottle dimensions."""
+    # Convert pixel dimensions to relative units (assuming 640x480 camera resolution)
+    height_ratio = box_height / 480
+    width_ratio = box_width / 640
+    
+    # Calculate gripper positions
+    # Base positions with adjustments based on bottle size
+    forward_distance = 0.5 + (height_ratio * 0.3)  # Adjust forward distance based on height
+    down_angle = -20 - (height_ratio * 30)  # Adjust down angle based on height
+    final_angle = 30 + (height_ratio * 20)  # Adjust final angle based on height
+    
+    return forward_distance, down_angle, final_angle
 
 def main():
     parser = argparse.ArgumentParser()
