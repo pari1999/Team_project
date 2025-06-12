@@ -35,30 +35,68 @@ def detect_and_pick(centering_threshold=30, min_box_width=120, min_box_height=12
             if img is None:
                 continue
 
-            # Detect blue box using color thresholding
+            # Convert to HSV for color detection
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-            lower_blue = np.array([100, 150, 50])
-            upper_blue = np.array([140, 255, 255])
-            mask = cv2.inRange(hsv, lower_blue, upper_blue)
+
+            # Define color ranges
+            # Red color range (red wraps around in HSV)
+            lower_red1 = np.array([0, 150, 50])
+            upper_red1 = np.array([10, 255, 255])
+            lower_red2 = np.array([170, 150, 50])
+            upper_red2 = np.array([180, 255, 255])
+            
+            # Green color range
+            lower_green = np.array([40, 150, 50])
+            upper_green = np.array([80, 255, 255])
+
+            # Commented out Blue detection
+            # lower_blue = np.array([100, 150, 50])
+            # upper_blue = np.array([140, 255, 255])
+
+            # Create masks for red and green
+            mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
+            mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
+            mask_red = cv2.bitwise_or(mask_red1, mask_red2)
+            mask_green = cv2.inRange(hsv, lower_green, upper_green)
+
+            # Combine masks
+            mask = cv2.bitwise_or(mask_red, mask_green)
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             largest_area = 0
             largest_bbox = None
+            detected_color = None
+
             for cnt in contours:
                 x, y, w, h = cv2.boundingRect(cnt)
                 area = w * h
                 if area > largest_area:
+                    # Check which color is detected
+                    roi = hsv[y:y+h, x:x+w]
+                    red_pixels = cv2.countNonZero(cv2.bitwise_or(
+                        cv2.inRange(roi, lower_red1, upper_red1),
+                        cv2.inRange(roi, lower_red2, upper_red2)
+                    ))
+                    green_pixels = cv2.countNonZero(cv2.inRange(roi, lower_green, upper_green))
+                    
+                    if red_pixels > green_pixels:
+                        detected_color = 'red'
+                    else:
+                        detected_color = 'green'
+                    
                     largest_area = area
                     largest_bbox = (x, y, w, h)
 
             if largest_bbox is not None and largest_area > 1000:  # filter out small noise
                 x, y, w, h = largest_bbox
-                cv2.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
-                cv2.putText(img, 'blue box', (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                color = (0, 0, 255) if detected_color == 'red' else (0, 255, 0)
+                cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
+                cv2.putText(img, f'{detected_color} object', (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
                 # Save frame
                 frame_path = os.path.join(frames_dir, f"frame_{frame_count}.jpg")
                 cv2.imwrite(frame_path, img)
-                logger.info(f"[DJI] Blue box detected at (x={x}, y={y}, w={w}, h={h}), saved to {frame_path}")
+                logger.info(f"[DJI] {detected_color.capitalize()} object detected at (x={x}, y={y}, w={w}, h={h}), saved to {frame_path}")
                 frame_count += 1
 
                 # Centering logic
@@ -67,39 +105,42 @@ def detect_and_pick(centering_threshold=30, min_box_width=120, min_box_height=12
                 offset_x = box_center_x - img_center_x
 
                 if abs(offset_x) > centering_threshold:
-                    # Rotate towards the box
-                    rotation_speed = 10 if offset_x > 0 else -10  # right if box is right, left if left
+                    # Rotate towards the object
+                    rotation_speed = 10 if offset_x > 0 else -10
                     ep_chassis.drive_speed(x=0, y=0, z=rotation_speed)
-                    logger.info(f"[DJI] Centering blue box: offset_x={offset_x}, rotating {'right' if offset_x > 0 else 'left'}.")
+                    logger.info(f"[DJI] Centering {detected_color} object: offset_x={offset_x}, rotating {'right' if offset_x > 0 else 'left'}.")
                 else:
                     # Stop rotating when centered
                     ep_chassis.drive_speed(x=0, y=0, z=0)
-                    logger.info("[DJI] Blue box centered.")
-                    # Check if box is big enough
+                    logger.info(f"[DJI] {detected_color.capitalize()} object centered.")
+                    
+                    # Check if object is big enough
                     if w < min_box_width or h < min_box_height:
-                        # Move forward a little to make the box bigger
-                        logger.info(f"[DJI] Box too small (w={w}, h={h}), moving forward to increase size.")
-                        ep_chassis.drive_speed(x=0.2, y=0, z=0)  # Move forward slowly
-                        time.sleep(0.3)  # Move for 0.3 seconds (adjust as needed for 2-4cm)
-                        ep_chassis.drive_speed(x=0, y=0, z=0)  # Stop
+                        logger.info(f"[DJI] Object too small (w={w}, h={h}), moving forward to increase size.")
+                        ep_chassis.drive_speed(x=0.2, y=0, z=0)
+                        time.sleep(0.3)
+                        ep_chassis.drive_speed(x=0, y=0, z=0)
                         time.sleep(0.2)
-                        continue  # Re-detect after moving forward
-                    logger.info("[DJI] Blue box big enough, picking up at fixed position")
+                        continue
+
+                    logger.info(f"[DJI] {detected_color.capitalize()} object big enough, picking up at fixed position")
                     ep_arm.move(130, -30).wait_for_completed()
                     time.sleep(0.5)
                     ep_gripper.close()
                     time.sleep(1)
-                    # Move arm above after pick up (higher y value, e.g., 60 to 120)
-                    for y_arm in range(-30, 121, 20):  # from -30 to 120 in steps of 20
+                    
+                    # Move arm above after pick up
+                    for y_arm in range(-30, 121, 20):
                         ep_arm.move(130, y_arm).wait_for_completed()
                         time.sleep(0.2)
-                    logger.info("[DJI] Blue box picked up")
+                    
+                    logger.info(f"[DJI] {detected_color.capitalize()} object picked up")
                     ep_camera.stop_video_stream()
                     cv2.destroyAllWindows()
                     ep_robot.close()
                     return
             else:
-                # Rotate in place to search for blue object
+                # Rotate in place to search for objects
                 ep_chassis.drive_speed(x=0, y=0, z=10)
 
             cv2.imshow("RoboMaster EP Camera", img)
