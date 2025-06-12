@@ -5,7 +5,7 @@ This project is an autonomous sorting system that uses a Braccio robot and a DJI
 
 ## Features
 - **Object Detection**: The Braccio robot uses a YOLOv5 model to detect objects in its field of view.
-- **Object Classification**: The Braccio robot classifies the detected objects (currently work in progress).
+- **Object Classification**: The Braccio robot classifies the detected objects based on colors
 - **Parallel Processing**: The system runs the Braccio and DJI operations in separate threads.
 - **Logging**: The system uses logging for traceability and debugging.
 
