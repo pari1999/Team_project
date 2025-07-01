@@ -10,6 +10,7 @@ class ColorObjectDetector:
         self.last_command_time = 0
         self.red_counter = 0
         self.yellow_counter = 0
+        self.green_counter = 0
         self.detection_threshold = 5
 
         try:
@@ -22,6 +23,7 @@ class ColorObjectDetector:
 
         self.current_command = None
         self.awaiting_done = False
+
 
     def send_command(self, color):
         if self.awaiting_done:
@@ -62,17 +64,24 @@ class ColorObjectDetector:
 
         lower_yellow = np.array([22, 150, 150])
         upper_yellow = np.array([32, 255, 255])
+        
+        lower_green = np.array([40, 70, 70])
+        upper_green = np.array([80, 255, 255])
 
         mask_red1 = cv2.inRange(hsv, lower_red1, upper_red1)
         mask_red2 = cv2.inRange(hsv, lower_red2, upper_red2)
         mask_red = cv2.bitwise_or(mask_red1, mask_red2)
         mask_yellow = cv2.inRange(hsv, lower_yellow, upper_yellow)
+        mask_green = cv2.inRange(hsv, lower_green, upper_green)
+
 
         kernel = np.ones((5, 5), np.uint8)
         mask_red = cv2.morphologyEx(mask_red, cv2.MORPH_OPEN, kernel)
         mask_yellow = cv2.morphologyEx(mask_yellow, cv2.MORPH_OPEN, kernel)
+        mask_green = cv2.morphologyEx(mask_green, cv2.MORPH_OPEN, kernel)
 
-        return mask_red, mask_yellow
+
+        return mask_red, mask_yellow ,mask_green
 
     def find_and_draw_contours(self, frame, mask, color_name, box_color):
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -103,10 +112,11 @@ class ColorObjectDetector:
             print("Starting color-based detection. Press 'q' to quit.")
             while True:
                 in_frame = video_queue.get().getCvFrame()
-                mask_red, mask_yellow = self.detect_colors(in_frame)
+                mask_red, mask_yellow ,mask_green = self.detect_colors(in_frame)
 
                 red_detected = self.find_and_draw_contours(in_frame, mask_red, "red", (0, 0, 255))
                 yellow_detected = self.find_and_draw_contours(in_frame, mask_yellow, "yellow", (0, 255, 255))
+                green_detected = self.find_and_draw_contours(in_frame, mask_green, "green", (0, 255, 0))
 
                 self.check_arduino_done()
 
@@ -119,6 +129,11 @@ class ColorObjectDetector:
                     self.yellow_counter += 1
                 else:
                     self.yellow_counter = 0
+                    
+                if green_detected:
+                    self.green_counter += 1
+                else:
+                    self.green_counter = 0
 
                 if self.red_counter >= self.detection_threshold and not self.awaiting_done:
                     if self.current_command != "RED":
@@ -126,7 +141,12 @@ class ColorObjectDetector:
 
                 if self.yellow_counter >= self.detection_threshold and not self.awaiting_done:
                     if self.current_command != "YELLOW":
-                        self.send_command("YELLOW")
+                        pass
+                        #self.send_command("YELLOW")
+                        
+                if self.green_counter >= self.detection_threshold and not self.awaiting_done:
+                    if self.current_command != "GREEN":
+                        self.send_command("GREEN")
 
                 cv2.imshow("Color Detection", in_frame)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
