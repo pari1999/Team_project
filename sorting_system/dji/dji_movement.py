@@ -10,7 +10,8 @@ from dji import tof_sensor
 aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 aruco_params = cv2.aruco.DetectorParameters()
 aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
-MARKER_ID = 1
+PICKUP_MARKER_ID = 1
+DROPOFF_MARKER_ID = 2
 MARKER_LENGTH = 0.15  # in meters
 
 # Load camera calibration
@@ -18,96 +19,112 @@ data = np.load("ep_camera_calibration.npz")
 camera_matrix = data["camera_matrix"]
 dist_coeffs = data["dist_coeffs"]
 
+
 # Constants
 YAW_THRESHOLD = 1.0        # degrees
 DOCKING_DISTANCE = 0.3     # meters
 ROTATION_GAIN = -0.05
 ROTATION_MIN = 1.0         # deg/sec
+DOCKING_DISTANCE_M     = 0.30    # stop within 30 cm
 
-def automated_forward_pickup(ep_chassis, ep_camera):
+SCAN_Z_SPEED = 20.0
+YAW_THRESHOLD_DEG = 5.0
+LATERAL_THRESHOLD_PX = 50
+MAX_LATERAL_SPEED_MS = 0.05
+FORWARD_SPEED_MS = 0.10
+MIN_ROTATION_SPEED_DPS = 5.0
+MARKER_SIZE_M = MARKER_LENGTH  # just to keep naming consistent
+
+def normalize_yaw(yaw_deg):
+    # wrap to [-180,180]
+    yaw = (yaw_deg + 180) % 360 - 180
+    # fold into [-90,90]
+    if   yaw >  90: yaw -= 180
+    elif yaw < -90: yaw += 180
+    return yaw
+
+def automated_forward_pickup(chassis, cam):
     print("[INFO] starting pickup process...")
+    mode = "scan"
+    scan_dir = 1
 
-    last_seen_yaw_deg = 0.0
-    lost_yaw_direction = 1
+    try:
+        while True:
+            frame = cam.read_cv2_image(strategy="newest", timeout=5)
+            if frame is None:
+                continue
 
-    while True:
-        frame = ep_camera.read_cv2_image(strategy="newest", timeout=5)
-        if frame is None:
-            continue
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            corners, ids, _ = aruco_detector.detectMarkers(gray)
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = aruco_detector.detectMarkers(gray)
+            vx = vy = wz = 0.0
 
-        forward_speed = 0.0
-        lateral_speed = 0.0
-        rotation_speed = 0.0
+            # SCAN MODE: spin until marker appears
+            if mode == "scan":
 
-        if ids is not None and MARKER_ID in ids:
-            idx = list(ids.flatten()).index(MARKER_ID)
-            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
-                corners, MARKER_LENGTH, camera_matrix, dist_coeffs)
+                wz = scan_dir * SCAN_Z_SPEED
+                cv2.putText(frame, "SCANNING...", (10,30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+                if ids is not None and PICKUP_MARKER_ID in ids:
+                    mode = "approach"
+                    print("[INFO] Marker detected → switching to APPROACH")
 
-            distance = tvecs[idx][0][2]
-            marker_x = corners[idx][0][:, 0].mean()
-            frame_center = frame.shape[1] // 2
-            offset_x = marker_x - frame_center
+            # APPROACH MODE
+            if mode == "approach":
+                if ids is None or PICKUP_MARKER_ID not in ids:
+                    mode = "scan"
+                    continue
 
-            # Lateral alignment
-            lateral_speed = 0.002 * offset_x
-            lateral_speed = np.clip(lateral_speed, -0.05, 0.05)
+                idx = list(ids.flatten()).index(PICKUP_MARKER_ID)
+                rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+                    corners, MARKER_SIZE_M, camera_matrix, dist_coeffs)
+                tz = tvecs[idx][0][2]
+                px_mean = corners[idx][0][:, 0].mean()
+                cx = frame.shape[1] / 2
+                offset_x = px_mean - cx
 
-            # Yaw estimation
-            rotation_matrix, _ = cv2.Rodrigues(rvecs[idx])
-            yaw_rad = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
-            yaw_deg = np.degrees(yaw_rad)
+                R, _ = cv2.Rodrigues(rvecs[idx])
+                raw_yaw = np.degrees(np.arctan2(R[0,2], R[2,2]))
+                yaw_deg = normalize_yaw(raw_yaw)
 
-            # Optional: amplify yaw if far
-            if distance > 0.8:
-                yaw_deg *= (1 + 0.5 * (distance - 0.8))
+                if abs(yaw_deg) > YAW_THRESHOLD_DEG:
+                    vx = 0.0
+                    vy = 0.0
+                    sign = np.sign(yaw_deg)
+                    wz = sign * max(MIN_ROTATION_SPEED_DPS,
+                                    abs(ROTATION_GAIN * yaw_deg))
+                elif abs(offset_x) > LATERAL_THRESHOLD_PX:
+                    vx = 0.0
+                    wz = 0.0
+                    vy = np.clip(0.002 * offset_x,
+                                 -MAX_LATERAL_SPEED_MS,
+                                  MAX_LATERAL_SPEED_MS)
+                else:
+                    vy = 0.0
+                    wz = 0.0
+                    vx = FORWARD_SPEED_MS
 
-            last_seen_yaw_deg = yaw_deg
-            lost_yaw_direction = -np.sign(yaw_deg) if yaw_deg != 0 else 1
+                cv2.putText(frame,
+                    f"D={tz:.2f}m Off={offset_x:.0f}px Yaw={yaw_deg:.1f}° vx={vx:.2f}",
+                    (10,60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
-            # Yaw correction
-            if abs(yaw_deg) > YAW_THRESHOLD:
-                rotation_speed = ROTATION_GAIN * yaw_deg
-                if abs(rotation_speed) < ROTATION_MIN:
-                    rotation_speed = np.sign(rotation_speed) * ROTATION_MIN
-                forward_speed = 0.0
-            else:
-                rotation_speed = 0.0
-                forward_speed = 0.1
+                if tz <= DOCKING_DISTANCE_M:
+                    print("[INFO] Docked successfully!")
+                    break
 
-            # Final docking condition
-            if distance <= DOCKING_DISTANCE and abs(yaw_deg) <= YAW_THRESHOLD:
-                print("[INFO] ✅ reached successfully at 30cm and aligned.")
+            chassis.drive_speed(x=vx, y=vy, z=wz)
+
+            cv2.imshow("Docking View", frame)
+            if cv2.waitKey(1) == ord('q'):
                 break
+            time.sleep(0.05)
 
-            print(f"[DEBUG] Distance: {distance:.2f}m | Offset: {offset_x:.1f}px | Yaw: {yaw_deg:.2f}°")
+    finally:
+        chassis.drive_speed(x=0, y=0, z=0)
+        cam.stop_video_stream()
+        cv2.destroyAllWindows()
+        print("[DONE]")
 
-            cv2.putText(frame, f"Dist: {distance:.2f}m | Offset: {offset_x:.1f}px | Yaw: {yaw_deg:.1f}°",
-                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-        else:
-            # Marker lost – rotate in last known direction
-            forward_speed = 0.0
-            lateral_speed = 0.0
-            rotation_speed = lost_yaw_direction * ROTATION_MIN
-            print("[WARN] Marker lost. Scanning...")
-
-            cv2.putText(frame, "Searching for ArUco Marker...",
-                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-        ep_chassis.drive_speed(x=forward_speed, y=lateral_speed, z=rotation_speed)
-
-        cv2.imshow("robot View", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-        time.sleep(0.05)
-
-    ep_chassis.drive_speed(x=0, y=0, z=0)
-    print("[INFO] reached the location and stopped.")
 
 def rotate_in_place(ep_chassis):
     print("[INFO] rotating 180 degrees in place...")
@@ -122,85 +139,84 @@ def rotate_in_place(ep_chassis):
     print("[INFO] ✅ rotation complete.")
 
 
+def automated_return_dropoff(chassis, cam):
+    print("[INFO] starting dropping process...")
+    mode = "scan"
+    scan_dir = 1
+    cam.start_video_stream(display=True)
 
-def automated_return_dropoff(ep_chassis, ep_camera):
-    print("[INFO] starting return-to-dropoff process...")
+    try:
+        while True:
+            frame = cam.read_cv2_image(strategy="newest", timeout=5)
+            if frame is None:
+                continue
 
-    DROP_MARKER_ID = 2
-    last_seen_yaw_deg = 0.0
-    lost_yaw_direction = 1
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            corners, ids, _ = aruco_detector.detectMarkers(gray)
 
-    while True:
-        frame = ep_camera.read_cv2_image(strategy="newest", timeout=5)
-        if frame is None:
-            continue
+            vx = vy = wz = 0.0
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = aruco_detector.detectMarkers(gray)
+            # SCAN MODE: spin until marker appears
+            if mode == "scan":
+                wz = scan_dir * SCAN_Z_SPEED
+                cv2.putText(frame, "SCANNING...", (10,30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+                if ids is not None and DROPOFF_MARKER_ID in ids:
+                    mode = "approach"
+                    print("[INFO] Marker detected → switching to APPROACH")
 
-        forward_speed = 0.0
-        lateral_speed = 0.0
-        rotation_speed = 0.0
+            # APPROACH MODE
+            if mode == "approach":
+                if ids is None or DROPOFF_MARKER_ID not in ids:
+                    mode = "scan"
+                    continue
 
-        if ids is not None and DROP_MARKER_ID in ids:
-            idx = list(ids.flatten()).index(DROP_MARKER_ID)
-            rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
-                corners, MARKER_LENGTH, camera_matrix, dist_coeffs)
+                idx = list(ids.flatten()).index(DROPOFF_MARKER_ID)
+                rvecs, tvecs, _ = cv2.aruco.estimatePoseSingleMarkers(
+                    corners, MARKER_SIZE_M, camera_matrix, dist_coeffs)
+                tz = tvecs[idx][0][2]
+                px_mean = corners[idx][0][:, 0].mean()
+                cx = frame.shape[1] / 2
+                offset_x = px_mean - cx
 
-            distance = tvecs[idx][0][2]
-            marker_x = corners[idx][0][:, 0].mean()
-            frame_center = frame.shape[1] // 2
-            offset_x = marker_x - frame_center
+                R, _ = cv2.Rodrigues(rvecs[idx])
+                raw_yaw = np.degrees(np.arctan2(R[0,2], R[2,2]))
+                yaw_deg = normalize_yaw(raw_yaw)
 
-            # Lateral alignment
-            lateral_speed = 0.002 * offset_x
-            lateral_speed = np.clip(lateral_speed, -0.05, 0.05)
+                if abs(yaw_deg) > YAW_THRESHOLD_DEG:
+                    vx = 0.0
+                    vy = 0.0
+                    sign = np.sign(yaw_deg)
+                    wz = sign * max(MIN_ROTATION_SPEED_DPS,
+                                    abs(ROTATION_GAIN * yaw_deg))
+                elif abs(offset_x) > LATERAL_THRESHOLD_PX:
+                    vx = 0.0
+                    wz = 0.0
+                    vy = np.clip(0.002 * offset_x,
+                                 -MAX_LATERAL_SPEED_MS,
+                                  MAX_LATERAL_SPEED_MS)
+                else:
+                    vy = 0.0
+                    wz = 0.0
+                    vx = FORWARD_SPEED_MS
 
-            # Yaw estimation
-            rotation_matrix, _ = cv2.Rodrigues(rvecs[idx])
-            yaw_rad = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
-            yaw_deg = np.degrees(yaw_rad)
+                cv2.putText(frame,
+                    f"D={tz:.2f}m Off={offset_x:.0f}px Yaw={yaw_deg:.1f}° vx={vx:.2f}",
+                    (10,60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
 
-            if distance > 0.8:
-                yaw_deg *= (1 + 0.5 * (distance - 0.8))
+                if tz <= DOCKING_DISTANCE_M:
+                    print("[INFO] Docked successfully!")
+                    break
 
-            last_seen_yaw_deg = yaw_deg
-            lost_yaw_direction = -np.sign(yaw_deg) if yaw_deg != 0 else 1
+            chassis.drive_speed(x=vx, y=vy, z=wz)
 
-            if abs(yaw_deg) > YAW_THRESHOLD:
-                rotation_speed = ROTATION_GAIN * yaw_deg
-                if abs(rotation_speed) < ROTATION_MIN:
-                    rotation_speed = np.sign(rotation_speed) * ROTATION_MIN
-                forward_speed = 0.0
-            else:
-                rotation_speed = 0.0
-                forward_speed = 0.1
-
-            if distance <= DOCKING_DISTANCE and abs(yaw_deg) <= YAW_THRESHOLD:
-                print("[INFO] ✅ returned to dropoff position and aligned.")
+            cv2.imshow("Docking View", frame)
+            if cv2.waitKey(1) == ord('q'):
                 break
+            time.sleep(0.05)
 
-            print(f"[DEBUG] Distance: {distance:.2f}m | Offset: {offset_x:.1f}px | Yaw: {yaw_deg:.2f}°")
-
-            cv2.putText(frame, f"Drop Dist: {distance:.2f}m | Offset: {offset_x:.1f}px | Yaw: {yaw_deg:.1f}°",
-                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-        else:
-            forward_speed = 0.0
-            lateral_speed = 0.0
-            rotation_speed = lost_yaw_direction * ROTATION_MIN
-            print("[WARN] Drop marker lost. Scanning...")
-
-            cv2.putText(frame, "Searching for Drop Marker...",
-                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
-        ep_chassis.drive_speed(x=forward_speed, y=lateral_speed, z=rotation_speed)
-
-        cv2.imshow("robot View", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-        time.sleep(0.05)
-
-    ep_chassis.drive_speed(x=0, y=0, z=0)
-    print("[INFO] reached drop location and stopped.")
+    finally:
+        chassis.drive_speed(x=0, y=0, z=0)
+        cam.stop_video_stream()
+        cv2.destroyAllWindows()
+        print("[DONE]")
