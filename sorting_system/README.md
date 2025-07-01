@@ -4,14 +4,14 @@
 This project is an autonomous sorting system that uses a Braccio robot and a DJI RoboMaster to detect and sort objects. The system is designed to run in parallel, with the Braccio handling object detection and sorting, and the DJI robot performing movement operations.
 
 ## Features
-- **Object Detection**: The Braccio robot uses a YOLOv5 model to detect objects in its field of view.
-- **Object Classification**: The Braccio robot classifies the detected objects (currently work in progress).
+- **Object Detection**: The Braccio robot uses color classification model to detect objects in its field of view.
+- **Object Classification**: The Braccio robot classifies the detected objects.
 - **Parallel Processing**: The system runs the Braccio and DJI operations in separate threads.
 - **Logging**: The system uses logging for traceability and debugging.
 
 ## Next Steps
 1. **Object Detection for Braccio**:
-   - Implement a robust object detection algorithm using the YOLOv5 model.
+   - Implement a robust object detection algorithm using color classification model.
    - Train the model on a dataset of objects to be sorted.
    - Integrate the model with the Braccio camera to detect and classify objects in real-time.
 
@@ -27,9 +27,8 @@ This project is an autonomous sorting system that uses a Braccio robot and a DJI
 - **`main.py`**: The entry point of the application, responsible for starting the Braccio and DJI threads.
 - **`braccio/`**: Contains modules related to the Braccio robot.
   - **`braccio_main.py`**: Main module for the Braccio robot, coordinating object detection and sorting.
-  - **`braccio_camera.py`**: Handles camera operations for the Braccio robot.
-  - **`braccio_object.py`**: Contains logic for object detection.
-  - **`braccio_serial.py`**: Manages serial communication with the Braccio robot.
+  - **`color_detection.py`**: Detects the objects based on object color and sends commands to the Braccio.
+  - **`pick_place`**: performs the pick and place task based on the serial command.
 - **`dji/`**: Contains modules related to the DJI RoboMaster.
   - **`dji_main.py`**: Main module for the DJI RoboMaster, coordinating movement operations.
   - **`dji_camera.py`**: Handles camera operations for the DJI RoboMaster.
