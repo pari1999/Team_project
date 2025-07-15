@@ -1,6 +1,6 @@
 import threading
 from dji import dji_main
-from braccio import braccio_main
+#from braccio import braccio_main
 import logging
 
 logging.basicConfig(level=logging.INFO)
