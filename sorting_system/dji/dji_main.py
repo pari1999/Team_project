@@ -13,6 +13,7 @@ def run():
         dji_camera.main()
         dji_movement.rotate_in_place(dji_robot_initialize.ep_chassis)
         dji_movement.automated_return_dropoff(dji_robot_initialize.ep_chassis,dji_robot_initialize.ep_camera)
+        dji_robot_initialize.ep_gripper.open()
         dji_movement.rotate_in_place(dji_robot_initialize.ep_chassis)
     except Exception as e:
         logger.error(f"[DJI] Error: {e}")
